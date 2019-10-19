@@ -31,6 +31,12 @@ drone.connect()
 drone.wait_for_connection(60.0)
 container = av.open(drone.get_video_stream())
 fd = FaceDetector("trained_data/haarcascade_frontalface_default.xml")
+kpki_vert = (0.35, 0.05)
+kpki_lateral = (0.35, 0.05)
+kpki_frontal = (0.8, 0.05)
+last_face_followed = (0, 0, 0, 0)
+face_detecting = 1
+droneflying = 0
 
 
 @app.route("/")
@@ -46,7 +52,32 @@ def video_feed():
                     mimetype="multipart/x-mixed-replace; boundary=frame")
 
 
+@app.route("/takeoff")
+def drone_takoff():
+    global droneflying
+    if droneflying == 0:
+        stop_drone()
+        drone.takeoff()
+        drone.takeoff()  # redoundant
+        droneflying = 1
+        return "Succesfully takeoff!"
+    else:
+        stop_drone()
+        drone.land()
+        drone.land()  # redoundant
+        droneflying = 0
+        return "Succesfully land!"
+
+
+def stop_drone():
+    drone.left(0)
+    drone.up(0)
+    drone.forward(0)
+    drone.clockwise(0)
+
+
 def process_frame(image):
+    global last_face_followed
     image_bw = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     (faceRects, face_areas) = fd.track_faces(image_bw)
     (h, w) = image.shape[:2]
@@ -54,19 +85,75 @@ def process_frame(image):
     cWidth = int(w/2)
     cHeight = int(h/2)
     cv2.circle(image, (cWidth, cHeight), 10, (0, 255, 0), 1)
-
+    last_rect_center = find_center(last_face_followed)
     ind = 1
-    for face_area in face_areas:
+    min_distance_from_prev = 10000
+    for (x, y, xw, yh) in face_areas:
         # color all rectangles in green
-        cv2.rectangle(
-            image, (face_area[0], face_area[1]), (face_area[2], face_area[3]), (0, 255, 0), 2)
-        ind = ind+1
+        cv2.rectangle(image, (x, y), (xw, yh), (0, 255, 0), 2)
+        cv2.putText(image, '(x ='+str(x)+', y ='+str(y)+')', (x-5, y-5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 255, 255), 1, cv2.LINE_AA)
 
-    if(ind > 1):  # if found at least one rectangle
-        # color the target rectangle in red
-        print("I found: " + str(len(faceRects)) + " faces")
+        cv2.putText(image, '(xw='+str(xw)+',yh='+str(yh)+')', (xw, yh),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 255, 255), 1, cv2.LINE_AA)
+        # these are our target coordinates
+        center = find_center((x, y, xw, yh))
+        cv2.circle(image, (int(center[0]), int(center[1])), 5, (0, 255, 0), 1)
+        # calculate distance from the center of previously-followed target
+        distance_from_prev = linalg.norm(
+            ((center[0]-last_rect_center[0]), (center[1]-last_rect_center[1])))
+        # find the nearest rectangle
+        if(distance_from_prev <= min_distance_from_prev):
+            min_distance_from_prev = distance_from_prev
+            last_face_followed = (x, y, xw, yh)
+        ind = ind+1
+        if(ind > 1):  # if we found at least one rectangle
+            # color the target rectangle in red
+            print("FACE CHOESEN!")
+            cv2.rectangle(image, (last_face_followed[0], last_face_followed[1]), (
+                last_face_followed[2], last_face_followed[3]), (0, 0, 255), 2)
+            rect_width = last_face_followed[2] - \
+                last_face_followed[0]
+            rect_center = find_center(last_face_followed)
+            if face_detecting == 1:
+                tracking_vert_loop((h, w), rect_center)
+                tracking_lateral_loop((h, w), rect_center)
+                tracking_frontal_loop((h, w), rect_width)
+        else:
+            if face_detecting == 1:
+                stop_drone()
 
     return image
+
+
+def tracking_vert_loop(image_size, rect_center):
+    image_center = (image_size[0] / 2, image_size[1] / 2)
+    vert_error = (image_center[0]-rect_center[1])
+    up_strength = int(kpki_vert[0]*vert_error)
+    print("up_strength:", up_strength)
+    drone.up(up_strength)
+
+
+def tracking_lateral_loop(image_size, rect_center):
+    image_center = (image_size[0] / 2, image_size[1] / 2)
+    lateral_error = (image_center[1]-rect_center[0])
+    clockwise_strength = -(int(kpki_lateral[0]*lateral_error))
+    print("clockwise_strength:", clockwise_strength)
+    drone.clockwise(clockwise_strength)
+
+
+def tracking_frontal_loop(image_size, rect_width):
+    image_width = image_size[1]
+    frontal_error = image_width/6-rect_width
+    frontal_strength = (int(kpki_frontal[0]*frontal_error))
+    print("frontal_strength:", frontal_strength)
+    drone.forward(frontal_strength)
+
+
+def find_center(rect_vertices):
+    rect_center = ((rect_vertices[2] + rect_vertices[0]) /
+                   2), (rect_vertices[3] + rect_vertices[1]) / 2
+    return rect_center
 
 
 def cv_video():
